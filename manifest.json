@@ -1,7 +1,7 @@
 {
   "name": "Gym",
   "short_name": "Gym",
-  "start_url": "./index.html",
+  "start_url": "./Index.html",
   "scope": "./",
   "display": "standalone",
   "background_color": "#0f1115",
