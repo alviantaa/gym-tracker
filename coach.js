@@ -1,16 +1,22 @@
-/* Gym Tracker — coach.js v9 (AI layer + small UI patches). Loaded after app.js + dash.js. Wraps existing functions only.
-   AI toggle rule: switch ON → every AI feature shows. OFF → none of it (no Coach card, Ask, plan, finder, "next", ✨, finish notes).
-   The switch lives in the Sync screen only. "next" kg/reps are written by the AI (Suggestions tab) after every Finish.
-   Needs Coach.gs v9 (SERVER.ai). Without it SERVER.ai is missing and the AI part stays out of the way.
-   v9: "+ New person" on the first-login "Who is this?" screen.
-   v8 UI patches (work with AI off too): mid/core reminder = 2× a week · "Who is this?" is mandatory, asked once per phone
-   (the phone is tagged with that person; Sync → Change) · Sync Refresh button uses the pill style · "+ New exercise" gets the same finder. */
+/* Gym Tracker — coach.js v10 (AI layer + UI patches). Loaded after app.js + dash.js. Wraps existing functions only.
+   AI toggle (default OFF, Sync screen): ON = every AI feature shows. OFF = basic UI only (no Coach card, Ask, plan, Create with AI, ✨).
+   Exception: "next" kg/reps always come from the AI (Suggestions tab, refreshed after every Finish, also when the toggle is Off); "next -" = no value yet.
+   Needs Coach.gs v11 (SERVER.ai). Without it SERVER.ai is missing and the AI part stays out of the way.
+   v10: waiting boxes + locked buttons while the AI works (Ask, Insights, Regenerate, Create workout, Finder) · 30 s refresh only while something waits ·
+        "Create workout with AI" lives in Today's split, opens an in-progress workout that fills itself · purple AI workout tab · Coach plan card disappears once used ·
+        "Empty" workout (Add exercise then shows All ★) · Add exercise has no search bar · AI finder only inside "+ New exercise" · History tag counts exercises ·
+        Sync order: status, AI coach, theme, this phone.
+   UI patches that work with AI off too: mid/core reminder 2× a week · "Who is this?" mandatory once per phone + "+ New person" · pill-style Refresh. */
 (function(){
 const hasAi = () => !!(SERVER && SERVER.ai);
 const aiOn = () => hasAi() && SERVER.ai.enabled;
-const hm = s => s && s.slice(0, 10) === today() ? s.slice(11, 16) : '';          // HH:mm only if it happened today (older AI content shows no time)
+const hm = s => s && s.slice(0, 10) === today() ? s.slice(11, 16) : '';          // HH:mm only if it happened today
 const tm = s => { const t = hm(s); return t ? ' · ' + t : ''; };
-let askDraft = '', planOpen = false, insOpen = {}, busyOps = {}, aiBusy = false;
+const tsOf = s => { const t = s ? new Date(String(s).replace(' ', 'T')).getTime() : 0; return t || 0; };
+const mf = t => Math.floor(t / 60000) * 60000;                                    // sheet times have minute precision
+const WAIT = 20 * 60000;                                                          // a request older than this no longer locks anything
+let askDraft = '', planOpen = false, insOpen = {}, aiBusy = false, finWait = false, manual = false;
+const waitBox = (t, sub) => `<div class="aiw"><div class="row" style="gap:8px"><i></i><b>${esc(t)}</b></div><div class="small">${esc(sub || "Might take a while… You can leave your question here. It's still in process and will appear when it's ready.")}</div></div>`;
 
 /* ---------- backend ---------- */
 async function coachCall(r){
@@ -36,10 +42,15 @@ async function setAi(want){
   aiBusy = false; if (syncOpen) drawSync(); render();
 }
 
-/* ---------- "next" target: only from the AI (nothing when AI is off or has no suggestion) ---------- */
+/* ---------- what is still waiting for the AI (each lock ends when the answer arrives, or after 20 min) ---------- */
+const askWait = p => hasAi() && SERVER.ai.asks.some(x => x[2] === p && !x[4] && x[6] === 'pending' && Date.now() - tsOf(x[1]) < WAIT);
+const insWait = p => { const t = (LS.get('insReq', {}) || {})[p]; if (!t || Date.now() - t > WAIT) return false; return !SERVER.ai.ins.some(x => x[2] === p && tsOf(x[1]) >= mf(t)); };
+const planWait = d => !!(d && d.aiReq && !d.aiReq.done && Date.now() - d.aiReq.at < WAIT);
+
+/* ---------- "next" target: always from the AI (Suggestions tab); nothing in the sheet yet → "next -" ---------- */
 let sugSrc = null, sugMap = {};
 function sugFor(name, person){
-  if (!aiOn()) return null;
+  if (!hasAi()) return null;
   if (sugSrc !== SERVER.ai.sug) { sugSrc = SERVER.ai.sug; sugMap = {}; sugSrc.forEach(r => sugMap[r[0] + '|' + r[1].toLowerCase()] = r); }   // [person, ex, equipment, kg, reps, reason, based on, run id, created]; later rows win
   return sugMap[person + '|' + String(name).toLowerCase()] || null;
 }
@@ -52,22 +63,26 @@ targetFor = function(name, person){
   return { kg, reps, ai:true, up: s && kg > (s.lastKg || 0) ? kg - (s.lastKg || 0) : 0 };
 };
 const _tgtText = tgtText;
-tgtText = t => _tgtText(t) + (t && t.ai ? ' ✨' : '');
+tgtText = t => _tgtText(t) + (t && t.ai && aiOn() ? ' ✨' : '');
 
 const _exCard = exCard;
 exCard = function(it, w){
   let h = _exCard(it, w);
-  if (!aiOn() || w === EDIT) return h;
+  if (w === EDIT) return h;
+  const k = it.ex.toLowerCase();
+  w.people.forEach(p => { if (D.stats[k + '|' + p] && !targetFor(it.ex, p))                                          // no AI value yet → "next -"
+    h = h.replace(/(<div class="pp-h">(?:<b[^>]*>[^<]*<\/b>)?<span>best [^<]*)(<\/span>)/, '$1 · <span class="dim">next -</span>$2'); });
+  if (!aiOn()) return h;
   const g = sugFor(it.ex, w.people[0]); if (!g) return h;
   if (g[2]) h = h.replace(/(<span class="tag s-\w+">\w+<\/span>)/, m => m + `<span class="tag ai" title="equipment the coach assumed">${esc(g[2])}</span>`);
   if (g[5]) h = h.replace(/(<div class="pp-h">[\s\S]*?<\/div>)/, m => m + `<div class="small aic" style="margin:-2px 0 6px">✨ ${esc(g[5])}${tm(g[8])}</div>`);
   return h;
 };
 
-/* ---------- Sync screen: AI On/Off switch + pill-style Refresh + "This phone" ---------- */
+/* ---------- Sync screen: status → AI coach → theme → this phone (✕ closes) ---------- */
 function statusText(){
   const A = SERVER.ai, q = A.q || {};
-  if (!A.enabled) return 'Off — nothing is sent to the coach' + (q.held ? ` · ${q.held} held` : '');
+  if (!A.enabled) return 'Off — only the "next" targets update after Finish' + (q.held ? ` · ${q.held} held` : '');
   const b = [];
   if (q.running) b.push('Coach is working…'); else if (q.pending) b.push(`${q.pending} waiting · catching up`); else b.push('Idle');
   if (q.last) b.push('last run ' + (hm(q.last) || q.last.slice(5, 10)));
@@ -77,24 +92,27 @@ function statusText(){
 const _drawSync = drawSync;
 drawSync = function(){
   _drawSync();
+  const x = $('#shClose'); if (x) x.hidden = false;
   const rb = $('#syRefresh');                                              // Refresh = same pill style as the switches
   if (rb && !rb.parentNode.classList.contains('sw')) { const w = document.createElement('div'); w.className = 'sw'; rb.replaceWith(w); rb.className = ''; w.appendChild(rb); }
+  const first = $('#shBody').firstElementChild;
+  if (hasAi() && first) {
+    const on = SERVER.ai.enabled;
+    first.insertAdjacentHTML('afterend', `<div class="card ai" style="padding:12px"><div class="row"><div style="flex:1;min-width:0"><b>✨ AI coach</b><div class="small muted">${esc(statusText())}</div></div>
+      <div class="sw" id="aiSeg"><button data-v="1" class="${on ? 'on' : ''}">On</button><button data-v="0" class="${on ? '' : 'on'}">Off</button></div></div></div>`);
+    $('#aiSeg').onclick = e => { const b = e.target.closest('[data-v]'); if (b) setAi(b.dataset.v === '1'); };
+  }
   const me = LS.get('me', null);
   if (me && DATA) {
     $('#shBody').insertAdjacentHTML('beforeend', `<div class="card" style="padding:12px"><div class="row"><div style="flex:1;min-width:0"><b>📱 This phone</b><div class="small muted">${pn(me)}</div></div><div class="sw"><button id="whoBtn">Change</button></div></div></div>`);
     $('#whoBtn').onclick = () => { LS.del('me'); closeSheet(); askWho(); };
   }
-  if (!hasAi()) return;
-  const on = SERVER.ai.enabled;
-  $('#shBody').insertAdjacentHTML('afterbegin', `<div class="card ai" style="padding:12px"><div class="row"><div style="flex:1;min-width:0"><b>✨ AI coach</b><div class="small muted">${esc(statusText())}</div></div>
-    <div class="sw" id="aiSeg"><button data-v="1" class="${on ? 'on' : ''}">On</button><button data-v="0" class="${on ? '' : 'on'}">Off</button></div></div></div>`);
-  $('#aiSeg').onclick = e => { const b = e.target.closest('[data-v]'); if (b) setAi(b.dataset.v === '1'); };
 };
 
 /* ---------- "Who is this?": mandatory, once per phone (this phone is tagged with that person) + "+ New person" ---------- */
 let whoOpen = false;
 const _closeSheet = closeSheet;
-closeSheet = function(){ whoOpen = false; const x = $('#shClose'); if (x) x.hidden = false; _closeSheet(); };
+closeSheet = function(){ whoOpen = false; finWait = false; const x = $('#shClose'); if (x) x.hidden = false; _closeSheet(); };
 $('#shClose').onclick = () => { if (!whoOpen) closeSheet(); };
 $('#scrim').onclick = () => { if (!whoOpen) closeSheet(); };
 const _askWho = askWho;
@@ -145,6 +163,14 @@ renderHeader = function(){
   if (q.pending || q.running) el.textContent = (el.textContent ? el.textContent + ' · ' : '') + '✨ Coach is catching up…';
 };
 
+/* ---------- History: the U/M/L tag counts different exercises, not sets ---------- */
+const _dayCard = dayCard;
+dayCard = function(date, logs){
+  const ex = {upper:new Set(), mid:new Set(), lower:new Set()};
+  logs.forEach(l => ex[l.split].add(l.ex.toLowerCase()));
+  return _dayCard(date, logs).replace(/(<span class="tag s-(upper|mid|lower)">[UML] )\d+/g, (m, a, k) => a + ex[k].size);
+};
+
 /* ---------- Dashboard: one purple Coach + Ask card after Body split ---------- */
 document.addEventListener('input', e => { if (e.target.id === 'aiQ') askDraft = e.target.value; });
 const CHIPS = ['What should I improve?', 'What are my weak points?'];
@@ -152,29 +178,39 @@ function coachCard(){
   const A = SERVER.ai, p = SEL[0];
   const all = A.ins.filter(x => x[2] === p), fresh = all.filter(x => x[8] === 'new').length;
   const newest = all.reduce((m, x) => x[1] > m ? x[1] : m, ''), recent = newest && daysAgo(newest.slice(0, 10)) <= 1;
-  const asks = A.asks.filter(x => x[2] === p).slice(-3).reverse(), t = hm((A.q || {}).last || '');
+  const asks = A.asks.filter(x => x[2] === p).slice(-3).reverse(), t = hm((A.q || {}).last || ''), iw = insWait(p), aw = askWait(p);
   const rows = all.slice(-4).reverse().map(x => { const open = insOpen[x[0]];
     return `<div class="sub" data-ins="${x[0]}" data-new="${x[8] === 'new' ? 1 : ''}" style="cursor:pointer"><div class="row"><div class="grow" style="flex:1;min-width:0;font-weight:600;font-size:14px">${x[8] === 'new' ? '<span class="aic">●</span> ' : ''}${esc(x[5])}</div><span class="small dim">${hm(x[1])}</span><span class="dim">${open ? '▴' : '▾'}</span></div>
       ${open ? `<div class="small muted" style="margin-top:6px;white-space:pre-wrap">${esc(x[6])}</div>${x[7] ? `<div class="small aic" style="margin-top:4px;white-space:pre-wrap">→ ${esc(x[7])}</div>` : ''}` : ''}</div>`; }).join('');
+  const body = (iw ? waitBox('Building your insights') : '') + (recent ? rows : '')
+    + (recent ? `<button class="btn aio full" id="aiRegen" ${iw ? 'disabled' : ''}>↻ Regenerate insights</button>` : `<button class="btn ai full" id="aiIns" ${iw ? 'disabled' : ''}>My Workout Insights</button>`);
+  const ans = x => x[4] ? `<span class="dim">${tm(x[5])}</span></b><div class="muted" style="white-space:pre-wrap">${esc(x[4])}</div>`
+    : '</b>' + (Date.now() - tsOf(x[1]) < WAIT ? waitBox('Thinking about your question') : '<div class="muted">No answer yet.</div>');
   return `<div class="card ai" id="aiCoach"><h3><span class="sp aic">✨ Coach</span><span class="small aic" style="text-transform:none;letter-spacing:0">${fresh ? fresh + ' new' : ''}${fresh && t ? ' • ' : ''}${t}</span></h3>
-    ${recent ? rows : `<button class="btn ai full" id="aiIns">My Workout Insights</button>`}
+    ${body}
     <div class="aisep"><div class="row" style="gap:8px;margin-bottom:8px;flex-wrap:wrap">${CHIPS.map(c => `<button class="tag ai" data-chip="${esc(c)}">${esc(c)}</button>`).join('')}</div>
-    <div class="row" style="gap:8px"><input id="aiQ" maxlength="300" placeholder="Ask your coach…" value="${esc(askDraft)}"><button class="btn sm ai" id="aiAsk">Ask</button></div>
-    ${asks.map(x => `<div class="small" style="margin-top:8px"><b>${esc(x[3])}</b>${x[4] ? `<span class="dim">${tm(x[5])}</span>` : ''}<div class="muted" style="white-space:pre-wrap">${x[4] ? esc(x[4]) : '✨ queued'}</div></div>`).join('')}</div></div>`;
+    <div class="row" style="gap:8px"><input id="aiQ" maxlength="300" placeholder="Ask your coach…" value="${esc(askDraft)}"><button class="btn sm ai" id="aiAsk" ${aw ? 'disabled' : ''}>Ask</button></div>
+    ${asks.map(x => `<div class="small" style="margin-top:8px"><b>${esc(x[3])}${ans(x)}</div>`).join('')}</div></div>`;
 }
 function mountCoach(){
   const cards = document.querySelectorAll('#v-dash .card'); if (cards.length < 2) return;
   cards[1].insertAdjacentHTML('afterend', coachCard());
-  const box = $('#aiCoach');
-  box.onclick = async e => {
+  $('#aiCoach').onclick = async e => {
     const chip = e.target.closest('[data-chip]');
     if (chip) { askDraft = chip.dataset.chip; $('#aiQ').value = askDraft; return; }                // chips only fill the input
     const ins = e.target.closest('[data-ins]');
     if (ins) { const k = ins.dataset.ins; insOpen[k] = !insOpen[k]; if (insOpen[k] && ins.dataset.new) coachCall({op:'insight', row:k, status:'seen'}); return renderDash(); }
-    if (e.target.id === 'aiIns') return lockBtn(e.target, async () => { if (await coachCall({op:'insights', person: SEL[0]})) toast('✨ Queued — tap Dashboard in a minute'); });
+    const p = SEL[0];
+    if (e.target.id === 'aiIns' || e.target.id === 'aiRegen') return lockBtn(e.target, async () => {
+      if (insWait(p)) return;
+      const j = await coachCall({op:'insights', person: p, force: e.target.id === 'aiRegen'}); if (!j) return;
+      if (!/up to date/i.test(j.msg || '')) LS.set('insReq', Object.assign({}, LS.get('insReq', {}), {[p]: Date.now()}));
+      toast('✨ Queued'); renderDash();
+    });
     if (e.target.id === 'aiAsk') return lockBtn(e.target, async () => {
       const q = askDraft.trim(); if (!q) return toast('Type a question');
-      if (await coachCall({op:'ask', person: SEL[0], q})) { askDraft = ''; toast('✨ Queued'); renderDash(); }
+      if (askWait(p)) return;
+      if (await coachCall({op:'ask', person: p, q})) { askDraft = ''; toast('✨ Queued'); renderDash(); }
     });
   };
 }
@@ -184,35 +220,45 @@ renderDash = function(){
   if (aiOn()) mountCoach();
 };
 
-/* ---------- Workout start screen: AI plan card (persists until a finished workout advances the rotation) + Create with AI ---------- */
-function planRows(p){
-  const all = SERVER.ai.plan.filter(r => r[0] === p); if (!all.length) return [];
+/* ---------- Workout: AI plan card (gone once used) · Create with AI (in Today's split) · Empty · purple AI tab ---------- */
+function planRows(p, since){
+  const all = SERVER.ai.plan.filter(r => r[0] === p && (!since || tsOf(r[9]) >= since)); if (!all.length) return [];
   const day = all[all.length - 1][1];
   return all.filter(r => r[1] === day).sort((a, b) => a[2] - b[2]).slice(0, 6).map(r => ({day:r[1], ex:r[3], sets:r[4], kg:r[5], reps:r[6], role:r[7], reason:r[8], at:r[9] || ''}));
 }
 const inMenu = n => DATA.menu.some(m => m[0].toLowerCase() === n.toLowerCase());
-function planLive(p, rows){                                                 // shown until nextPlanIndex moves past the value seen with this plan
-  const key = p + '|' + rows.map(r => r.ex).join(','), seen = LS.get('aiPlanSeen', {});
-  if (!seen[p] || seen[p].key !== key) { seen[p] = {key, idx: nextPlanIndex(p)}; LS.set('aiPlanSeen', seen); return true; }
-  return seen[p].idx === nextPlanIndex(p);
-}
-async function acceptPlan(p, rows){
-  const type = /lower|leg/i.test(rows[0].day) ? 'lower' : 'upper', idx = planIdxFor(p, type);
+const planKey = (p, rows) => p + '|' + rows.map(r => r.ex).join(',') + '|' + rows[0].at;
+const planUsed = (p, rows) => (LS.get('aiPlanUsed', {}) || {})[p] === planKey(p, rows);
+const markUsed = (p, rows) => { const u = LS.get('aiPlanUsed', {}) || {}; u[p] = planKey(p, rows); LS.set('aiPlanUsed', u); };
+/** put plan rows into the open workout (skips exercises already there); unlisted ones join the Menu, hidden ones are activated */
+function addPlanItems(p, rows, type){
   const miss = rows.filter(r => !inMenu(r.ex)), hidn = miss.filter(r => SERVER.ai.hid && DATA.hid[r.ex.toLowerCase()]);
-  startDraft(idx, [], cap(type), type);
-  DRAFT.planIdxBy = {[p]: idx}; DRAFT.ai = true;
   rows.forEach(r => {
-    const it = newItem(r.ex), n = Math.max(1, Number(r.sets) || 3), kg = Number(r.kg) > 0 && !D.isIso(r.ex) ? r.kg : '';
+    if (DRAFT.items.some(i => i.ex.toLowerCase() === r.ex.toLowerCase())) return;
+    const it = newItem(r.ex, [p]), n = Math.max(1, Number(r.sets) || 3), kg = Number(r.kg) > 0 && !D.isIso(r.ex) ? r.kg : '';
     it.sets[p] = Array.from({length:n}, () => ({kg:'', reps:'', done:false, pk:kg, pr:r.reps, tag:'next'}));
     DRAFT.items.push(it);
   });
-  saveDraft(); render(); window.scrollTo(0, 0); toast('✨ AI plan loaded');
-  miss.filter(r => hidn.indexOf(r) < 0).forEach(r => {                      // unlisted exercises join the Menu automatically
-    const sp = /^(upper|mid|lower)$/.test(r.role) ? r.role : type, ty = D.isIso(r.ex) || /static/i.test(r.role) ? 'static' : '';
+  miss.filter(r => hidn.indexOf(r) < 0).forEach(r => {
+    const sp = /^(upper|mid|lower)$/.test(r.role) ? r.role : (type || 'upper'), ty = D.isIso(r.ex) || /static/i.test(r.role) ? 'static' : '';
     (SERVER ? SERVER.menu : DATA.menu).push([r.ex, sp, ty]);
     write({action:'addExercise', name:r.ex, split:sp, type:ty}, 'Added ' + r.ex);
   });
   if (hidn.length) coachCall({op:'activate', names: hidn.map(r => r.ex)});
+}
+function acceptPlan(p, rows){
+  const type = /lower|leg/i.test(rows[0].day) ? 'lower' : 'upper', idx = planIdxFor(p, type);
+  startDraft(idx, [], cap(type), type);
+  DRAFT.planIdxBy = {[p]: idx}; DRAFT.ai = true;
+  addPlanItems(p, rows, type); markUsed(p, rows);
+  saveDraft(); render(); window.scrollTo(0, 0); toast('✨ AI plan loaded');
+}
+/** an in-progress "Create with AI" workout fills itself when its plan reaches the sheet (no Accept step) */
+function fillAi(d){
+  const r = d.aiReq; if (!r || r.done || !aiOn()) return;
+  if (Date.now() - r.at > WAIT) { r.done = true; storeDraft(); return; }
+  const p = d.people[0], rows = planRows(p, mf(r.at)); if (!rows.length) return;
+  r.done = true; addPlanItems(p, rows, ''); markUsed(p, rows); saveDraft(); toast('✨ Workout ready');
 }
 /** workouts of this person this week (Mon–Sun) that had a mid/core exercise */
 function midThisWeek(p){
@@ -221,36 +267,44 @@ function midThisWeek(p){
   D.logs.forEach(l => { if (l.person === p && l.date && l.date >= from && l.split === 'mid') days[l.date] = 1; });
   return Object.keys(days).length;
 }
-const _renderWork = renderWork;
-renderWork = function(){
-  _renderWork();
+function startExtras(){
+  const p = SEL[0], type = LS.get('pickType', recSplit()), chips = $('#planChips'); if (!chips) return;
+  chips.insertAdjacentHTML('beforeend', `<button class="chip ${type === 'empty' ? 'on' : ''}" data-t="empty">Empty</button>`);
   const note = [...document.querySelectorAll('#v-work p.small.muted')].find(x => /^Remember: add 1 mid/.test(x.textContent));
-  if (note) { const n = midThisWeek(SEL[0]); note.textContent = n >= 2 ? 'Mid/core: 2 of 2 done this week ✓ · optional today. Add 1 static hold.' : `Mid/core this week: ${n} of 2. Add 1 static hold.`; }
-  if (!aiOn() || (DRAFT && !NEWW)) return;
-  const p = SEL[0], rows = planRows(p), box = $('#savedNotes'); if (!box) return;
-  const live = rows.length && planLive(p, rows);
-  box.insertAdjacentHTML('beforebegin', `${live ? `<div class="card ai" id="aiPlan"><h3><span class="sp aic">✨ Coach plan · ${esc(rows[0].day)}${tm(rows[0].at)}</span></h3>
+  if (note) { const n = midThisWeek(p); if (type === 'empty') note.hidden = true; else note.textContent = n >= 2 ? 'Mid/core: 2 of 2 done this week ✓ · optional today. Add 1 static hold.' : `Mid/core this week: ${n} of 2. Add 1 static hold.`; }
+  if (type === 'empty') $('#goPlan').onclick = () => { LS.del('pickType'); startDraft(null, [], 'Empty', ''); render(); };   // no rotation day: Add exercise shows everything
+  if (!aiOn()) return;
+  const rows = planRows(p), box = $('#savedNotes');
+  $('#goPlan').insertAdjacentHTML('afterend', `<button class="btn ai full" id="aiMakeBtn" style="margin-top:8px">✨ Create workout with AI</button>
+    ${planOpen ? `<div class="aisep" style="margin-top:10px"><input id="aiPref" maxlength="200" placeholder="e.g. full body, focus on glutes"><button class="btn ai full" id="aiPrefGo" style="margin-top:8px">Create</button></div>` : ''}`);
+  if (rows.length && !planUsed(p, rows)) box.insertAdjacentHTML('beforebegin', `<div class="card ai" id="aiPlan"><h3><span class="sp aic">✨ Coach plan · ${esc(rows[0].day)}${tm(rows[0].at)}</span></h3>
     <div class="list">${rows.map(r => `<div class="li"><div class="grow"><div class="t">${esc(r.ex)}${inMenu(r.ex) ? '' : ' <span class="tag ai">new</span>'}</div><div class="small muted" style="text-transform:none">${esc(r.reason || r.role || '')}</div></div>
       <span class="small"><b>${r.sets}×</b> ${Number(r.kg) > 0 ? fkg(r.kg) + ' kg × ' : ''}${esc(r.reps)}</span></div>`).join('')}</div>
-    <button class="btn ai full" id="aiAccept" style="margin-top:10px">Accept & start</button></div>` : ''}
-    <div class="card ai" id="aiMake" style="padding:12px"><button class="btn ai full" id="aiMakeBtn">✨ Create workout with AI</button>
-      ${planOpen ? `<div class="aisep" style="margin-top:10px"><input id="aiPref" maxlength="200" placeholder="e.g. full body, focus on glutes"><button class="btn ai full" id="aiPrefGo" style="margin-top:8px">Create</button>
-        <p class="small dim" style="margin:8px 0 0">Max 6 exercises, 1 static. The plan appears above after the next coach run — tap Workout again in a minute.</p></div>` : ''}</div>`);
+    <button class="btn ai full" id="aiAccept" style="margin-top:10px">Accept & start</button></div>`);
   const a = $('#aiAccept'); if (a) a.onclick = () => acceptPlan(p, rows);
   $('#aiMakeBtn').onclick = () => { planOpen = !planOpen; renderWork(); };
   const g = $('#aiPrefGo'); if (g) g.onclick = () => lockBtn(g, async () => {
     const q = ($('#aiPref').value || '').trim(); if (!q) return toast('Type a preference');
-    if (await coachCall({op:'plan', person: p, q})) { planOpen = false; toast('✨ Queued'); renderWork(); }
+    if (!await coachCall({op:'plan', person: p, q})) return;
+    planOpen = false; startDraft(null, [], 'Custom', ''); DRAFT.ai = true; DRAFT.aiReq = {at: Date.now(), q}; saveDraft();   // opens "in progress", fills itself
+    render(); window.scrollTo(0, 0);
   });
+}
+const _renderWork = renderWork;
+renderWork = function(){
+  if (DRAFT && !NEWW) fillAi(DRAFT);
+  _renderWork();
+  if (!DRAFT || NEWW) return startExtras();
+  const c = $('#wDate'); if (aiOn() && planWait(DRAFT) && c) c.closest('.card').insertAdjacentHTML('afterend', waitBox('Building your workout', "Might take a while… You can leave this open or come back later. The exercises with weight and reps fill in here when they're ready."));
 };
 const _wTabs = wTabs;
 wTabs = function(){
   let h = _wTabs();
-  if (aiOn()) wips(SEL[0]).forEach(d => { if (d.ai) h = h.replace(`data-w="${didOf(d)}">`, `data-w="${didOf(d)}">✨ `); });
+  if (aiOn()) wips(SEL[0]).forEach(d => { if (d.ai) h = h.replace(new RegExp(`class="chip( on)?" data-w="${didOf(d)}">`), (m, o) => `class="chip ai${o || ''}" data-w="${didOf(d)}">✨ `); });
   return h;
 };
 
-/* ---------- Finish: notes + RIR for the coach, sent with the sets (the backend then queues a "targets" run) ---------- */
+/* ---------- Finish: notes + RIR for the coach (AI on); every Finish also queues the "next" targets run (AI on or off) ---------- */
 const _showSummary = showSummary;
 showSummary = function(S, onDone, sub){
   _showSummary(S, onDone, sub);
@@ -275,7 +329,7 @@ showSummary = function(S, onDone, sub){
 /* every addLogs request carries one coach item per workout (the backend writes Notes + a "targets" Queue row, then fires the routine) */
 const _call = call;
 call = function(req){
-  if (req && req.action === 'addLogs' && req.entries && !req.coach && aiOn()) {
+  if (req && req.action === 'addLogs' && req.entries && !req.coach && hasAi()) {
     const stored = LS.get('aiNotes', {}), by = {};
     req.entries.forEach(e => { const did = String(e.cid).split(':')[0]; if (did && !by[did]) by[did] = {did, person:e.person, date:e.date}; });
     req.coach = Object.keys(by).map(d => Object.assign(by[d], {notes: (stored[d] || {}).notes || [], wnote: (stored[d] || {}).wnote || ''}));
@@ -286,20 +340,28 @@ call = function(req){
 const _write = write;
 write = async function(req, okMsg){
   const ok = await _write(req, okMsg);
-  if (ok && aiOn() && (req.action === 'saveDay' || req.action === 'deleteLogs')) coachCall({op:'queue', type:'edit', person: SEL[0], ref:'h' + Date.now().toString(36)});
+  if (ok && hasAi() && (req.action === 'saveDay' || req.action === 'deleteLogs')) coachCall({op:'queue', type:'edit', person: SEL[0], ref:'h' + Date.now().toString(36)});
   return ok;
 };
 
-/* ---------- exercise finder: one search box serves the menu and the AI (results only after a click, cleared when the sheet closes) ---------- */
-function finder(slot, qInput, opt){
+/* ---------- Add exercise: no search bar (gear kept; Empty workout → "All ★") ---------- */
+const _openPicker = openPicker;
+openPicker = function(opt){
+  if (opt && opt.title === 'Add exercise' && !opt.star && VIEW === 'work' && DRAFT && !DRAFT.split) opt.star = 'all';
+  _openPicker(opt);
+  const q = $('#pkQ'); if (q && opt && opt.title === 'Add exercise') q.closest('.search').remove();
+};
+
+/* ---------- "+ New exercise": AI finder or manual ---------- */
+function finder(slot, qInput){
   const box = $(slot), p = SEL[0], sel = new Set(); let asked = '';
   const ready = () => SERVER.ai.ideas.filter(x => x[2] === p && x[4] && x[3] === asked);
   const draw = () => {
-    const ql = ($(qInput).value || '').trim(), match = DATA.menu.some(m => m[0].toLowerCase().includes(ql.toLowerCase()));
-    const rs = asked ? ready() : [], wait = asked && SERVER.ai.ideas.some(x => x[2] === p && !x[4] && x[3] === asked);
-    box.innerHTML = (ql && !match && !asked ? `<button class="btn ai full" id="fnGo" style="margin-top:8px">✨ Suggest workout with AI</button>` : '')
+    const ql = ($(qInput).value || '').trim(), rs = asked ? ready() : [], wait = !!asked && !rs.length;
+    finWait = wait;
+    box.innerHTML = (!asked && ql ? `<button class="btn ai full" id="fnGo" style="margin-top:8px">✨ Find exercises</button>` : '')
       + (asked ? `<div class="small aic" style="margin:8px 0 4px">✨ “${esc(asked)}”${rs.length ? tm(rs[rs.length - 1][12]) : ''} <button class="small aic" id="fnRef" style="float:right">↻</button></div>` : '')
-      + (wait ? '<div class="small muted">Queued — tap ↻ in a minute</div>' : '')
+      + (wait ? waitBox('Finding exercises') : '')
       + rs.map(x => `<div class="pick ${sel.has(x[0]) ? 'sel' : ''}" data-ir="${x[0]}"><span class="chk">${sel.has(x[0]) ? '✓' : ''}</span>
         <span class="t">${esc(x[4])}<div class="small muted" style="text-transform:none">${esc(x[7])}${x[8] ? ' · ' + esc(x[8]) : ''}</div></span>${x[9] === 'yes' ? '' : '<span class="tag ai">new</span>'}<span class="tag s-${esc(x[5] || 'upper')}">${esc(x[5] || 'upper')}</span></div>`).join('')
       + (sel.size ? `<button class="btn ai full" id="fnAdd" style="margin-top:8px">Add ${sel.size} selected</button>` : '');
@@ -313,29 +375,30 @@ function finder(slot, qInput, opt){
       const j = await coachCall({op:'ideasAdded', rows: picks.map(x => x[0]), items: picks.map(x => ({name: titleCase(x[4]), split: x[5] || 'upper', type: x[6] === 'static' ? 'static' : ''}))});
       if (!j) return;
       await refresh(true);
-      closeSheet(); if (opt && opt.onPick) opt.onPick(picks.map(x => titleCase(x[4]))); else render();
+      closeSheet(); openMenuMgr();
     });
     const r = e.target.closest('[data-ir]'); if (!r) return;
     const k = Number(r.dataset.ir); if (sel.has(k)) sel.delete(k); else sel.add(k); draw();
   };
   draw();
 }
-const _openPicker = openPicker;
-openPicker = function(opt){
-  _openPicker(opt);
-  if (aiOn() && opt && opt.multi && opt.title === 'Add exercise') finder('#pkAi', '#pkQ', opt);
-};
-const _openMenuMgr = openMenuMgr;
-openMenuMgr = function(){
-  _openMenuMgr();
-  if (aiOn()) finder('#mmAi', '#mmQ', null);
-};
-/* "+ New exercise" is the same function as Add exercise: the name field is the search box, the finder sits under it */
+function newChooser(){
+  openSheet('New exercise', `<button class="btn ai full" id="ncAi">✨ Find exercise with AI</button><button class="btn full" id="ncMan" style="margin-top:8px">Add manually</button><button class="btn full" id="ncBack" style="margin-top:8px">Back</button>`);
+  $('#ncAi').onclick = findScreen; $('#ncMan').onclick = () => { manual = true; openExEdit(null); }; $('#ncBack').onclick = openMenuMgr;
+}
+function findScreen(){
+  openSheet('Find exercise with AI', `<div class="fld"><input id="fnQ" maxlength="200" placeholder="e.g. glute exercises with dumbbells" autocomplete="off"></div><div id="fnBox"></div><button class="btn full" id="fnBack" style="margin-top:8px">Back</button>`);
+  finder('#fnBox', '#fnQ'); $('#fnBack').onclick = newChooser;
+}
 const _openExEdit = openExEdit;
 openExEdit = function(name){
-  _openExEdit(name);
-  if (name == null && aiOn() && $('#xeN')) { $('#xeN').insertAdjacentHTML('afterend', '<div id="xeAi"></div>'); finder('#xeAi', '#xeN', null); }
+  if (name != null || !aiOn() || manual) { manual = false; return _openExEdit(name); }       // AI off → straight to the manual form
+  newChooser();
 };
+
+/* ---------- refresh every 30 s, only while something waits for the AI ---------- */
+const anyWait = () => aiOn() && SEL && SEL[0] && (askWait(SEL[0]) || insWait(SEL[0]) || planWait(DRAFT) || finWait);
+setInterval(() => { if (document.visibilityState === 'visible' && navigator.onLine !== false && anyWait()) refresh(false); }, 30000);
 
 if (SERVER) render();
 })();
