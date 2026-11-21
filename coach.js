@@ -1,7 +1,8 @@
-/* Gym Tracker — coach.js v10 (AI layer + UI patches). Loaded after app.js + dash.js. Wraps existing functions only.
+/* Gym Tracker — coach.js v11 (AI layer + UI patches). Loaded after app.js + dash.js. Wraps existing functions only.
    AI toggle (default OFF, Sync screen): ON = every AI feature shows. OFF = basic UI only (no Coach card, Ask, plan, Create with AI, ✨).
    Exception: "next" kg/reps always come from the AI (Suggestions tab, refreshed after every Finish, also when the toggle is Off); "next -" = no value yet.
    Needs Coach.gs v11 (SERVER.ai). Without it SERVER.ai is missing and the AI part stays out of the way.
+   v11: instant waiting states (Insights/Regenerate/Ask clear the old text at once) · Regenerate is purple · Ask: chips under the input, tidy answer cards · Create with AI opens the workout first · New exercise: green Add manually, finder shows last search + remembers it · "Best:" tag on the progress chart.
    v10: waiting boxes + locked buttons while the AI works (Ask, Insights, Regenerate, Create workout, Finder) · 30 s refresh only while something waits ·
         "Create workout with AI" lives in Today's split, opens an in-progress workout that fills itself · purple AI workout tab · Coach plan card disappears once used ·
         "Empty" workout (Add exercise then shows All ★) · Add exercise has no search bar · AI finder only inside "+ New exercise" · History tag counts exercises ·
@@ -43,7 +44,10 @@ async function setAi(want){
 }
 
 /* ---------- what is still waiting for the AI (each lock ends when the answer arrives, or after 20 min) ---------- */
-const askWait = p => hasAi() && SERVER.ai.asks.some(x => x[2] === p && !x[4] && x[6] === 'pending' && Date.now() - tsOf(x[1]) < WAIT);
+const askLocal = {};                                                              // question just sent from this phone, before the sheet shows it
+const localAsk = p => { const a = askLocal[p]; if (!a || Date.now() - a.at > WAIT) return null; return SERVER.ai.asks.some(x => x[2] === p && x[3] === a.q && tsOf(x[1]) >= mf(a.at)) ? null : a; };
+const askWait = p => hasAi() && (!!localAsk(p) || SERVER.ai.asks.some(x => x[2] === p && !x[4] && x[6] === 'pending' && Date.now() - tsOf(x[1]) < WAIT));
+const setIns = (p, v) => { const o = Object.assign({}, LS.get('insReq', {})); if (v) o[p] = v; else delete o[p]; LS.set('insReq', o); };
 const insWait = p => { const t = (LS.get('insReq', {}) || {})[p]; if (!t || Date.now() - t > WAIT) return false; return !SERVER.ai.ins.some(x => x[2] === p && tsOf(x[1]) >= mf(t)); };
 const planWait = d => !!(d && d.aiReq && !d.aiReq.done && Date.now() - d.aiReq.at < WAIT);
 
@@ -179,18 +183,21 @@ function coachCard(){
   const all = A.ins.filter(x => x[2] === p), fresh = all.filter(x => x[8] === 'new').length;
   const newest = all.reduce((m, x) => x[1] > m ? x[1] : m, ''), recent = newest && daysAgo(newest.slice(0, 10)) <= 1;
   const asks = A.asks.filter(x => x[2] === p).slice(-3).reverse(), t = hm((A.q || {}).last || ''), iw = insWait(p), aw = askWait(p);
+  const lq = localAsk(p), pend = lq ? {q: lq.q} : (aw ? asks.find(x => !x[4]) : null);
   const rows = all.slice(-4).reverse().map(x => { const open = insOpen[x[0]];
     return `<div class="sub" data-ins="${x[0]}" data-new="${x[8] === 'new' ? 1 : ''}" style="cursor:pointer"><div class="row"><div class="grow" style="flex:1;min-width:0;font-weight:600;font-size:14px">${x[8] === 'new' ? '<span class="aic">●</span> ' : ''}${esc(x[5])}</div><span class="small dim">${hm(x[1])}</span><span class="dim">${open ? '▴' : '▾'}</span></div>
       ${open ? `<div class="small muted" style="margin-top:6px;white-space:pre-wrap">${esc(x[6])}</div>${x[7] ? `<div class="small aic" style="margin-top:4px;white-space:pre-wrap">→ ${esc(x[7])}</div>` : ''}` : ''}</div>`; }).join('');
-  const body = (iw ? waitBox('Building your insights') : '') + (recent ? rows : '')
-    + (recent ? `<button class="btn aio full" id="aiRegen" ${iw ? 'disabled' : ''}>↻ Regenerate insights</button>` : `<button class="btn ai full" id="aiIns" ${iw ? 'disabled' : ''}>My Workout Insights</button>`);
-  const ans = x => x[4] ? `<span class="dim">${tm(x[5])}</span></b><div class="muted" style="white-space:pre-wrap">${esc(x[4])}</div>`
-    : '</b>' + (Date.now() - tsOf(x[1]) < WAIT ? waitBox('Thinking about your question') : '<div class="muted">No answer yet.</div>');
+  const body = iw ? waitBox('Building your insights') + `<button class="btn ai full" disabled>↻ Regenerate insights</button>`      // old insights vanish while a new run is waiting
+    : (recent ? rows : '') + (recent ? `<button class="btn ai full" id="aiRegen">↻ Regenerate insights</button>` : `<button class="btn ai full" id="aiIns">My Workout Insights</button>`);
+  const qa = (q, inner) => `<div class="sub" style="margin:8px 0 0"><div class="small dim" style="margin-bottom:6px">${esc(q)}</div>${inner}</div>`;
+  const ansCard = x => x[4] ? qa(x[3], `<div style="font-size:14px;line-height:1.6;white-space:pre-wrap">${esc(x[4])}</div><div class="small dim" style="margin-top:6px">${hm(x[5]) || String(x[5] || '').slice(5, 10)}</div>`)
+    : qa(x[3], Date.now() - tsOf(x[1]) < WAIT ? waitBox('Thinking about your question') : '<div class="muted small">No answer yet.</div>');
+  const answers = aw ? (pend ? qa(pend.q, waitBox('Thinking about your question')) : '') : asks.map(ansCard).join('');       // old answers vanish while waiting
   return `<div class="card ai" id="aiCoach"><h3><span class="sp aic">✨ Coach</span><span class="small aic" style="text-transform:none;letter-spacing:0">${fresh ? fresh + ' new' : ''}${fresh && t ? ' • ' : ''}${t}</span></h3>
     ${body}
-    <div class="aisep"><div class="row" style="gap:8px;margin-bottom:8px;flex-wrap:wrap">${CHIPS.map(c => `<button class="tag ai" data-chip="${esc(c)}">${esc(c)}</button>`).join('')}</div>
-    <div class="row" style="gap:8px"><input id="aiQ" maxlength="300" placeholder="Ask your coach…" value="${esc(askDraft)}"><button class="btn sm ai" id="aiAsk" ${aw ? 'disabled' : ''}>Ask</button></div>
-    ${asks.map(x => `<div class="small" style="margin-top:8px"><b>${esc(x[3])}${ans(x)}</div>`).join('')}</div></div>`;
+    <div class="aisep"><div class="row" style="gap:8px"><input id="aiQ" maxlength="300" placeholder="Ask your coach…" value="${esc(askDraft)}"><button class="btn sm ai" id="aiAsk" ${aw ? 'disabled' : ''}>Ask</button></div>
+    <div class="row" style="gap:8px;margin-top:8px;flex-wrap:wrap">${CHIPS.map(c => `<button class="tag ai" data-chip="${esc(c)}">${esc(c)}</button>`).join('')}</div>
+    ${answers}</div></div>`;
 }
 function mountCoach(){
   const cards = document.querySelectorAll('#v-dash .card'); if (cards.length < 2) return;
@@ -201,23 +208,42 @@ function mountCoach(){
     const ins = e.target.closest('[data-ins]');
     if (ins) { const k = ins.dataset.ins; insOpen[k] = !insOpen[k]; if (insOpen[k] && ins.dataset.new) coachCall({op:'insight', row:k, status:'seen'}); return renderDash(); }
     const p = SEL[0];
-    if (e.target.id === 'aiIns' || e.target.id === 'aiRegen') return lockBtn(e.target, async () => {
+    if (e.target.id === 'aiIns' || e.target.id === 'aiRegen') {                                    // instant: old insights vanish, waiting box shows
       if (insWait(p)) return;
-      const j = await coachCall({op:'insights', person: p, force: e.target.id === 'aiRegen'}); if (!j) return;
-      if (!/up to date/i.test(j.msg || '')) LS.set('insReq', Object.assign({}, LS.get('insReq', {}), {[p]: Date.now()}));
-      toast('✨ Queued'); renderDash();
-    });
-    if (e.target.id === 'aiAsk') return lockBtn(e.target, async () => {
+      const prev = (LS.get('insReq', {}) || {})[p]; setIns(p, Date.now()); renderDash();
+      const j = await coachCall({op:'insights', person: p, force: e.target.id === 'aiRegen'});
+      if (!j || /up to date/i.test(j.msg || '')) { setIns(p, prev); if (j) toast(j.msg); renderDash(); } else toast('✨ Queued');
+      return;
+    }
+    if (e.target.id === 'aiAsk') {                                                                 // instant: old answers vanish, thinking box shows
       const q = askDraft.trim(); if (!q) return toast('Type a question');
       if (askWait(p)) return;
-      if (await coachCall({op:'ask', person: p, q})) { askDraft = ''; toast('✨ Queued'); renderDash(); }
-    });
+      askLocal[p] = {q, at: Date.now()}; askDraft = ''; renderDash();
+      const j = await coachCall({op:'ask', person: p, q});
+      if (!j) { delete askLocal[p]; askDraft = q; renderDash(); } else toast('✨ Queued');
+      return;
+    }
   };
 }
 const _renderDash = renderDash;
 renderDash = function(){
   _renderDash();
   if (aiOn()) mountCoach();
+};
+
+/* ---------- Exercise progress: "Best: 80 kg × 5" tag (heaviest set ever; ties → more reps). Works with AI off too ---------- */
+const _progressHtml = progressHtml;
+progressHtml = function(ex, win){
+  const k = String(ex).toLowerCase(), iso = D.isIso(ex);
+  const tags = SEL.map(p => {
+    let b = null;
+    D.logs.forEach(l => { if (l.person !== p || String(l.ex).toLowerCase() !== k) return;
+      const kg = Number(l.kg) || 0, reps = Number(l.reps) || 0;
+      if (!b || (iso ? reps > b.reps : kg > b.kg || (kg === b.kg && reps > b.reps))) b = {kg, reps}; });
+    const txt = !b ? '-' : iso ? b.reps + ' s' : b.kg > 0 ? fkg(b.kg) + ' kg × ' + b.reps : b.reps + ' reps';
+    return `<span class="tag">${SEL.length > 1 ? esc(pn(p)) + ' · ' : ''}Best: ${txt}</span>`;
+  }).join(' ');
+  return `<div style="margin:2px 0 8px">${tags}</div>` + _progressHtml(ex, win);
 };
 
 /* ---------- Workout: AI plan card (gone once used) · Create with AI (in Today's split) · Empty · purple AI tab ---------- */
@@ -283,12 +309,13 @@ function startExtras(){
     <button class="btn ai full" id="aiAccept" style="margin-top:10px">Accept & start</button></div>`);
   const a = $('#aiAccept'); if (a) a.onclick = () => acceptPlan(p, rows);
   $('#aiMakeBtn').onclick = () => { planOpen = !planOpen; renderWork(); };
-  const g = $('#aiPrefGo'); if (g) g.onclick = () => lockBtn(g, async () => {
+  const g = $('#aiPrefGo'); if (g) g.onclick = async () => {
     const q = ($('#aiPref').value || '').trim(); if (!q) return toast('Type a preference');
-    if (!await coachCall({op:'plan', person: p, q})) return;
-    planOpen = false; startDraft(null, [], 'Custom', ''); DRAFT.ai = true; DRAFT.aiReq = {at: Date.now(), q}; saveDraft();   // opens "in progress", fills itself
+    planOpen = false; startDraft(null, [], 'Custom', ''); DRAFT.ai = true; DRAFT.aiReq = {at: Date.now(), q}; saveDraft();   // opens "in progress" at once, shows the build box, fills itself
     render(); window.scrollTo(0, 0);
-  });
+    const j = await coachCall({op:'plan', person: p, q});
+    if (!j && DRAFT && DRAFT.aiReq) { DRAFT.aiReq.done = true; saveDraft(); render(); }
+  };
 }
 const _renderWork = renderWork;
 renderWork = function(){
@@ -353,25 +380,40 @@ openPicker = function(opt){
 };
 
 /* ---------- "+ New exercise": AI finder or manual ---------- */
+const lastFind = p => (LS.get('lastFind', {}) || {})[p] || null;
+const setLastFind = (p, q) => { const a = Object.assign({}, LS.get('lastFind', {})); a[p] = {q, at: Date.now()}; LS.set('lastFind', a); };
 function finder(slot, qInput){
-  const box = $(slot), p = SEL[0], sel = new Set(); let asked = '';
-  const ready = () => SERVER.ai.ideas.filter(x => x[2] === p && x[4] && x[3] === asked);
+  const box = $(slot), p = SEL[0], sel = new Set(), MINHOLD = 4000;
+  const lf = lastFind(p); let asked = lf ? lf.q : '', askedAt = lf ? lf.at : 0, prevQ = '', hold = 0;
+  const ready = q => q ? SERVER.ai.ideas.filter(x => x[2] === p && x[4] && x[3] === q) : [];
+  const waiting = () => !!asked && (Date.now() < hold || (!ready(asked).length && Date.now() - askedAt < WAIT));
+  const list = rs => rs.map(x => `<div class="pick ${sel.has(x[0]) ? 'sel' : ''}" data-ir="${x[0]}"><span class="chk">${sel.has(x[0]) ? '✓' : ''}</span>
+        <span class="t">${esc(x[4])}<div class="small muted" style="text-transform:none">${esc(x[7])}${x[8] ? ' · ' + esc(x[8]) : ''}</div></span>${x[9] === 'yes' ? '' : '<span class="tag ai">new</span>'}<span class="tag s-${esc(x[5] || 'upper')}">${esc(x[5] || 'upper')}</span></div>`).join('');
   const draw = () => {
-    const ql = ($(qInput).value || '').trim(), rs = asked ? ready() : [], wait = !!asked && !rs.length;
-    finWait = wait;
-    box.innerHTML = (!asked && ql ? `<button class="btn ai full" id="fnGo" style="margin-top:8px">✨ Find exercises</button>` : '')
-      + (asked ? `<div class="small aic" style="margin:8px 0 4px">✨ “${esc(asked)}”${rs.length ? tm(rs[rs.length - 1][12]) : ''} <button class="small aic" id="fnRef" style="float:right">↻</button></div>` : '')
-      + (wait ? waitBox('Finding exercises') : '')
-      + rs.map(x => `<div class="pick ${sel.has(x[0]) ? 'sel' : ''}" data-ir="${x[0]}"><span class="chk">${sel.has(x[0]) ? '✓' : ''}</span>
-        <span class="t">${esc(x[4])}<div class="small muted" style="text-transform:none">${esc(x[7])}${x[8] ? ' · ' + esc(x[8]) : ''}</div></span>${x[9] === 'yes' ? '' : '<span class="tag ai">new</span>'}<span class="tag s-${esc(x[5] || 'upper')}">${esc(x[5] || 'upper')}</span></div>`).join('')
-      + (sel.size ? `<button class="btn ai full" id="fnAdd" style="margin-top:8px">Add ${sel.size} selected</button>` : '');
+    if (!box.isConnected) return;
+    const ql = ($(qInput).value || '').trim(), w = waiting(); finWait = w;
+    const rs = w ? ready(prevQ) : ready(asked), q = w ? prevQ : asked;
+    box.innerHTML = (ql && ql !== asked ? `<button class="btn ai full" id="fnGo" style="margin-top:8px">✨ Find exercises</button>` : '')
+      + (w ? waitBox('Finding exercises', 'Might take a while… You can close this. The search is saved and will be here when you come back.') : '')
+      + (q && (rs.length || !w) ? `<div class="small aic" style="margin:8px 0 4px">${w ? 'Last search' : '✨'} “${esc(q)}”${!w && rs.length ? tm(rs[rs.length - 1][12]) : ''}</div>` : '')
+      + list(rs)
+      + (!w && asked && !rs.length ? '<div class="small muted" style="margin:8px 0">No results yet. Tap ↻ to check again.</div>' : '')
+      + (asked ? `<button class="btn full" id="fnRef" style="margin-top:8px">↻ Refresh</button>` : '')
+      + (sel.size && !w ? `<button class="btn ai full" id="fnAdd" style="margin-top:8px">Add ${sel.size} selected</button>` : '');
   };
-  $(qInput).addEventListener('input', () => { if (asked && $(qInput).value.trim() !== asked) { asked = ''; sel.clear(); } draw(); });
+  $(qInput).addEventListener('input', draw);
   box.onclick = async e => {
-    if (e.target.id === 'fnGo') return lockBtn(e.target, async () => { const q = $(qInput).value.trim(); if (await coachCall({op:'suggest', person:p, q})) { asked = q; draw(); toast('✨ Queued'); } });
+    if (e.target.id === 'fnGo') {                                                        // instant: last results stay, loading box shows, new search is saved as the last one
+      const q = $(qInput).value.trim(), keep = {asked, askedAt, prevQ};
+      prevQ = asked; asked = q; askedAt = Date.now(); hold = askedAt + MINHOLD; sel.clear(); setLastFind(p, q); draw();
+      setTimeout(draw, MINHOLD + 50);
+      const j = await coachCall({op:'suggest', person:p, q});
+      if (!j) { asked = keep.asked; askedAt = keep.askedAt; prevQ = keep.prevQ; hold = 0; if (keep.asked) setLastFind(p, keep.asked); draw(); }
+      return;
+    }
     if (e.target.id === 'fnRef') return lockBtn(e.target, async () => { await refresh(true); draw(); });
     if (e.target.id === 'fnAdd') return lockBtn(e.target, async () => {
-      const picks = ready().filter(x => sel.has(x[0]));
+      const picks = ready(asked).filter(x => sel.has(x[0]));
       const j = await coachCall({op:'ideasAdded', rows: picks.map(x => x[0]), items: picks.map(x => ({name: titleCase(x[4]), split: x[5] || 'upper', type: x[6] === 'static' ? 'static' : ''}))});
       if (!j) return;
       await refresh(true);
@@ -380,14 +422,19 @@ function finder(slot, qInput){
     const r = e.target.closest('[data-ir]'); if (!r) return;
     const k = Number(r.dataset.ir); if (sel.has(k)) sel.delete(k); else sel.add(k); draw();
   };
+  const tick = setInterval(async () => {                                                 // keeps refreshing while it searches (stops when the sheet closes)
+    if (!box.isConnected) { clearInterval(tick); finWait = false; return; }
+    if (waiting() && navigator.onLine !== false) { await refresh(true); draw(); }
+  }, 7000);
   draw();
 }
 function newChooser(){
-  openSheet('New exercise', `<button class="btn ai full" id="ncAi">✨ Find exercise with AI</button><button class="btn full" id="ncMan" style="margin-top:8px">Add manually</button><button class="btn full" id="ncBack" style="margin-top:8px">Back</button>`);
+  openSheet('New exercise', `<button class="btn pri full" id="ncMan">Add manually</button><button class="btn ai full" id="ncAi" style="margin-top:8px">✨ Find exercise with AI</button><button class="btn full" id="ncBack" style="margin-top:8px">Back</button>`);
   $('#ncAi').onclick = findScreen; $('#ncMan').onclick = () => { manual = true; openExEdit(null); }; $('#ncBack').onclick = openMenuMgr;
 }
 function findScreen(){
-  openSheet('Find exercise with AI', `<div class="fld"><input id="fnQ" maxlength="200" placeholder="e.g. glute exercises with dumbbells" autocomplete="off"></div><div id="fnBox"></div><button class="btn full" id="fnBack" style="margin-top:8px">Back</button>`);
+  const lf = lastFind(SEL[0]);
+  openSheet('Find exercise with AI', `<div class="fld"><input id="fnQ" maxlength="200" placeholder="e.g. glute exercises with dumbbells" autocomplete="off" value="${esc(lf ? lf.q : '')}"></div><div id="fnBox"></div><button class="btn full" id="fnBack" style="margin-top:8px">Back</button>`);
   finder('#fnBox', '#fnQ'); $('#fnBack').onclick = newChooser;
 }
 const _openExEdit = openExEdit;
