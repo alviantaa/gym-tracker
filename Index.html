@@ -47,6 +47,8 @@ input:focus,select:focus{border-color:var(--go)}
 .chip .wip{position:absolute;top:-3px;right:-3px;width:10px;height:10px;border-radius:50%;background:var(--warn);border:2px solid var(--bg)}
 .chip .bd{position:absolute;top:-7px;right:-6px;font-size:11px;line-height:1}
 .chip.on{background:var(--go);border-color:var(--go);color:var(--goTx);font-weight:600}
+.chip.ai{color:var(--ai);border-color:var(--ai-line);background:var(--ai-soft)}
+.chip.ai.on{background:var(--ai);border-color:var(--ai);color:#fff;font-weight:600}
 .sync{position:relative;width:30px;height:30px;border-radius:50%;display:grid;place-items:center;background:var(--card);flex:none}
 .sync-n{position:absolute;top:-4px;right:-4px;min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:var(--warn);color:#111;font-size:10px;font-weight:700;line-height:16px;text-align:center}
 .dot{width:9px;height:9px;border-radius:50%;background:var(--ok)}
@@ -56,7 +58,7 @@ input:focus,select:focus{border-color:var(--go)}
 #busy.on{display:grid}
 #busy i{width:30px;height:30px;border-radius:50%;border:3px solid var(--line);border-top-color:var(--accent);animation:spin .8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
-#prog{position:fixed;left:0;right:0;top:var(--top);height:2px;z-index:29;overflow:hidden;display:none}
+#prog{position:fixed;left:0;right:0;top:var(--top);height:1px;z-index:29;overflow:hidden;display:none}
 #prog.on{display:block}
 #prog i{display:block;height:100%;width:40%;background:var(--accent);animation:slide 1s ease-in-out infinite}
 @keyframes slide{from{transform:translateX(-100%)}to{transform:translateX(250%)}}
@@ -82,12 +84,16 @@ main{padding:14px 14px 20px;max-width:640px;margin:0 auto}
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:11px 16px;border-radius:12px;background:var(--card2);border:1px solid var(--line);font-weight:600}
 .btn.pri{background:var(--go);border-color:var(--go);color:var(--goTx)}
 .btn.ai{background:var(--ai);border-color:var(--ai);color:#fff}
+.btn.aio{background:transparent;border-color:var(--ai-line);color:var(--ai)}
 .btn.full{width:100%}
 .btn.danger{color:var(--bad)}
 .btn.sm{padding:7px 11px;font-size:13px;border-radius:10px}
 .btn:disabled{opacity:.6}
 .card.ai{background:linear-gradient(180deg,var(--ai-soft),var(--card) 72px);border-color:var(--ai-line)}
 .aic{color:var(--ai)!important}
+.aiw{background:var(--ai-soft);border:1px solid var(--ai-line);color:var(--ai);border-radius:12px;padding:10px 12px;margin:8px 0}
+.aiw i{width:14px;height:14px;flex:none;border-radius:50%;border:2px solid var(--ai-line);border-top-color:var(--ai);animation:spin .8s linear infinite}
+.aiw .small{margin-top:4px}
 .sub{background:var(--card2);border:1px solid var(--line);border-radius:12px;padding:10px;margin-bottom:8px}
 .aisep{border-top:1px solid var(--line);margin-top:12px;padding-top:10px}
 .tag{display:inline-block;font-size:11px;padding:2px 7px;border-radius:6px;background:var(--card2);color:var(--muted);border:1px solid var(--line);text-transform:capitalize}
@@ -278,10 +284,10 @@ html.light{--bg:#f3f4f6;--card:#fff;--card2:#eef0f3;--line:#dde1e7;--text:#15171
 <div class="sheet" id="sheet"><div class="sh-h"><b id="shTitle"></b><button class="icon-btn" id="shGear" title="Manage exercises" hidden><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button><span class="sp"></span><button class="icon-btn" id="shClose">✕</button></div><div class="sh-b" id="shBody"></div></div>
 <div class="toast" id="toast"></div>
 
-<!-- v9: app.js (core) · dash.js (Dashboard) · coach.js (AI layer + new person + AI switch). Order matters. ?v=9 = cache bust. -->
+<!-- v10: app.js + dash.js unchanged (?v=9) · coach.js v10 (AI layer + UI patches). Order matters. ?v=N = cache bust. -->
 <script src="app.js?v=9"></script>
 <script src="dash.js?v=9"></script>
-<script src="coach.js?v=9"></script>
+<script src="coach.js?v=10"></script>
 <script>boot();</script>
 </body>
 </html>
