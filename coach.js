@@ -1,14 +1,16 @@
-/* Gym Tracker — coach.js v8 (AI layer + small UI patches). Loaded after app.js + dash.js. Wraps existing functions only.
-   AI toggle rule: Sync switch ON → every AI feature shows. OFF → none of it (no Coach card, Ask, plan, finder, "next", ✨, finish notes).
-   "next" kg/reps are written by the AI (Suggestions tab) after every Finish. Needs Coach.gs v9 (SERVER.ai). Without it SERVER.ai is missing and the AI part stays out of the way.
-   v8 UI patches (work with AI off too; fold into app.js at its next edit): mid/core reminder = 2× a week · "Who is this?" is mandatory, asked once per phone
+/* Gym Tracker — coach.js v9 (AI layer + small UI patches). Loaded after app.js + dash.js. Wraps existing functions only.
+   AI toggle rule: switch ON → every AI feature shows. OFF → none of it (no Coach card, Ask, plan, finder, "next", ✨, finish notes).
+   The switch lives in the Sync screen only. "next" kg/reps are written by the AI (Suggestions tab) after every Finish.
+   Needs Coach.gs v9 (SERVER.ai). Without it SERVER.ai is missing and the AI part stays out of the way.
+   v9: "+ New person" on the first-login "Who is this?" screen.
+   v8 UI patches (work with AI off too): mid/core reminder = 2× a week · "Who is this?" is mandatory, asked once per phone
    (the phone is tagged with that person; Sync → Change) · Sync Refresh button uses the pill style · "+ New exercise" gets the same finder. */
 (function(){
 const hasAi = () => !!(SERVER && SERVER.ai);
 const aiOn = () => hasAi() && SERVER.ai.enabled;
 const hm = s => s && s.slice(0, 10) === today() ? s.slice(11, 16) : '';          // HH:mm only if it happened today (older AI content shows no time)
 const tm = s => { const t = hm(s); return t ? ' · ' + t : ''; };
-let askDraft = '', planOpen = false, insOpen = {}, busyOps = {};
+let askDraft = '', planOpen = false, insOpen = {}, busyOps = {}, aiBusy = false;
 
 /* ---------- backend ---------- */
 async function coachCall(r){
@@ -24,6 +26,14 @@ async function lockBtn(b, fn){
   if (!b || b.disabled) return;
   const t = b.textContent; b.disabled = true; b.textContent = '…';
   try { return await fn(); } finally { if (b.isConnected) { b.disabled = false; b.textContent = t; } }
+}
+/** the AI On/Off switch (Sync screen): instant, then the sheet confirms */
+async function setAi(want){
+  if (!hasAi() || aiBusy || want === SERVER.ai.enabled) return;
+  aiBusy = true; SERVER.ai.enabled = want; if (syncOpen) drawSync(); render();
+  const j = await coachCall({op:'toggle', enabled: want});
+  if (!j) { SERVER.ai.enabled = !want; LS.set('data', SERVER); } else toast(want ? '✨ AI on' : 'AI off');
+  aiBusy = false; if (syncOpen) drawSync(); render();
 }
 
 /* ---------- "next" target: only from the AI (nothing when AI is off or has no suggestion) ---------- */
@@ -78,17 +88,10 @@ drawSync = function(){
   const on = SERVER.ai.enabled;
   $('#shBody').insertAdjacentHTML('afterbegin', `<div class="card ai" style="padding:12px"><div class="row"><div style="flex:1;min-width:0"><b>✨ AI coach</b><div class="small muted">${esc(statusText())}</div></div>
     <div class="sw" id="aiSeg"><button data-v="1" class="${on ? 'on' : ''}">On</button><button data-v="0" class="${on ? '' : 'on'}">Off</button></div></div></div>`);
-  $('#aiSeg').onclick = async e => {
-    const b = e.target.closest('[data-v]'); if (!b) return;
-    const want = b.dataset.v === '1'; if (want === SERVER.ai.enabled) return;
-    SERVER.ai.enabled = want; drawSync(); render();                          // instant, then the sheet confirms
-    const j = await coachCall({op:'toggle', enabled: want});
-    if (!j) { SERVER.ai.enabled = !want; LS.set('data', SERVER); } else toast(want ? '✨ AI on' : 'AI off');
-    if (syncOpen) drawSync(); render();
-  };
+  $('#aiSeg').onclick = e => { const b = e.target.closest('[data-v]'); if (b) setAi(b.dataset.v === '1'); };
 };
 
-/* ---------- "Who is this?": mandatory, once per phone (this phone is tagged with that person) ---------- */
+/* ---------- "Who is this?": mandatory, once per phone (this phone is tagged with that person) + "+ New person" ---------- */
 let whoOpen = false;
 const _closeSheet = closeSheet;
 closeSheet = function(){ whoOpen = false; const x = $('#shClose'); if (x) x.hidden = false; _closeSheet(); };
@@ -102,8 +105,36 @@ askWho = function(){
   if ($('#shBody [data-who]')) {
     whoOpen = true; $('#shTitle').textContent = 'Who is this?'; $('#shClose').hidden = true;
     $('#shBody').insertAdjacentHTML('afterbegin', '<p class="small muted" style="margin:0 0 10px">This phone gets tagged with the person you pick.</p>');
+    $('#shBody').insertAdjacentHTML('beforeend', '<button class="btn full" id="whoNew" style="margin-top:4px;border-style:dashed">+ New person</button>');
+    $('#whoNew').onclick = newPersonForm;
   }
 };
+/** new user on the first page: name + optional gender → creates the profile in the sheet and tags this phone with it */
+function newPersonForm(){
+  let gender = '';
+  $('#shTitle').textContent = 'New person';
+  $('#shBody').innerHTML = `<p class="small muted" style="margin:0 0 10px">New here? Add yourself. This phone will be tagged with you.</p>
+    <div class="fld"><label>Name</label><input id="nwN" maxlength="20" placeholder="e.g. Bayu" autocomplete="off"></div>
+    <div class="small muted" style="margin-bottom:4px">Gender (optional · locked once chosen)</div>
+    <div class="gx" id="nwG"><button class="m" data-g="m" aria-label="Male">${gSym('m')}</button><button class="f" data-g="f" aria-label="Female">${gSym('f')}</button></div>
+    <button class="btn pri full" id="nwGo">Add &amp; start</button><button class="btn full" id="nwBack" style="margin-top:8px">Back</button>`;
+  $('#nwG').onclick = e => { const b = e.target.closest('[data-g]'); if (!b) return; gender = b.dataset.g;
+    $('#nwG').querySelectorAll('button').forEach(z => z.classList.toggle('on', z.dataset.g === gender)); };
+  $('#nwBack').onclick = () => askWho();
+  $('#nwGo').onclick = () => {
+    const name = titleCase($('#nwN').value); if (!name) return toast('Type your name');
+    if (!DATA || !SERVER) return toast('📴 Needs a connection');
+    if (DATA.pinfo.some(y => String(y[1]).toLowerCase() === name.toLowerCase())) return toast('That name exists — pick it from the list');
+    let c = name.charAt(0).toUpperCase(); const base = c; let n = 2;
+    while (DATA.pinfo.some(y => y[0] === c)) c = base + n++;
+    DATA.pinfo.push([c, name, false, {}, gender]);
+    SERVER.people = DATA.pinfo; LS.set('data', SERVER);
+    LS.set('me', c); rebuild();
+    SEL = [c]; LS.set('sel', SEL); NEWW = false; syncDraft();
+    closeSheet(); render();
+    write({action:'savePerson', code:c, name, hidden:false, gender}, 'Welcome ' + name + ' 💪');
+  };
+}
 
 /* ---------- header line ---------- */
 const _renderHeader = renderHeader;
@@ -114,7 +145,7 @@ renderHeader = function(){
   if (q.pending || q.running) el.textContent = (el.textContent ? el.textContent + ' · ' : '') + '✨ Coach is catching up…';
 };
 
-/* ---------- Dashboard: one purple Coach + Ask card, after Body split ---------- */
+/* ---------- Dashboard: one purple Coach + Ask card after Body split ---------- */
 document.addEventListener('input', e => { if (e.target.id === 'aiQ') askDraft = e.target.value; });
 const CHIPS = ['What should I improve?', 'What are my weak points?'];
 function coachCard(){
@@ -131,10 +162,7 @@ function coachCard(){
     <div class="row" style="gap:8px"><input id="aiQ" maxlength="300" placeholder="Ask your coach…" value="${esc(askDraft)}"><button class="btn sm ai" id="aiAsk">Ask</button></div>
     ${asks.map(x => `<div class="small" style="margin-top:8px"><b>${esc(x[3])}</b>${x[4] ? `<span class="dim">${tm(x[5])}</span>` : ''}<div class="muted" style="white-space:pre-wrap">${x[4] ? esc(x[4]) : '✨ queued'}</div></div>`).join('')}</div></div>`;
 }
-const _renderDash = renderDash;
-renderDash = function(){
-  _renderDash();
-  if (!aiOn()) return;
+function mountCoach(){
   const cards = document.querySelectorAll('#v-dash .card'); if (cards.length < 2) return;
   cards[1].insertAdjacentHTML('afterend', coachCard());
   const box = $('#aiCoach');
@@ -149,6 +177,11 @@ renderDash = function(){
       if (await coachCall({op:'ask', person: SEL[0], q})) { askDraft = ''; toast('✨ Queued'); renderDash(); }
     });
   };
+}
+const _renderDash = renderDash;
+renderDash = function(){
+  _renderDash();
+  if (aiOn()) mountCoach();
 };
 
 /* ---------- Workout start screen: AI plan card (persists until a finished workout advances the rotation) + Create with AI ---------- */
