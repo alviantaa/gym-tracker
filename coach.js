@@ -1,15 +1,39 @@
-/* Gym Tracker — coach.js v11 (AI layer + UI patches). Loaded after app.js + dash.js. Wraps existing functions only.
+/* Gym Tracker — coach.js v12 (AI layer + UI patches). Loaded after app.js + dash.js. Wraps existing functions only.
    AI toggle (default OFF, Sync screen): ON = every AI feature shows. OFF = basic UI only (no Coach card, Ask, plan, Create with AI, ✨).
    Exception: "next" kg/reps always come from the AI (Suggestions tab, refreshed after every Finish, also when the toggle is Off); "next -" = no value yet.
    Needs Coach.gs v11 (SERVER.ai). Without it SERVER.ai is missing and the AI part stays out of the way.
+   v12: (1) INSIGHTS NOW SHOW: the routine writes times into the sheet as numbers (46347.79861); every AI time is converted back to "yyyy-MM-dd HH:mm" (fixAi), so rows are no longer hidden and the purple box clears ·
+        (2) FAST READ-BACK: while something waits (Ask, Insights, Create workout, Finder) the app asks the sheet for fresh AI data every 8 s (cache skipped) and redraws only when something changed ·
+        (3) the box also clears when the coach run has finished (idle, newer than the tap) · (4) every AI input bar is purple (outline + focus).
    v11: instant waiting states (Insights/Regenerate/Ask clear the old text at once) · Regenerate is purple · Ask: chips under the input, tidy answer cards · Create with AI opens the workout first · New exercise: green Add manually, finder shows last search + remembers it · "Best:" tag on the progress chart.
-   v10: waiting boxes + locked buttons while the AI works (Ask, Insights, Regenerate, Create workout, Finder) · 30 s refresh only while something waits ·
+   v10: waiting boxes + locked buttons while the AI works (Ask, Insights, Regenerate, Create workout, Finder) ·
         "Create workout with AI" lives in Today's split, opens an in-progress workout that fills itself · purple AI workout tab · Coach plan card disappears once used ·
         "Empty" workout (Add exercise then shows All ★) · Add exercise has no search bar · AI finder only inside "+ New exercise" · History tag counts exercises ·
         Sync order: status, AI coach, theme, this phone.
    UI patches that work with AI off too: mid/core reminder 2× a week · "Who is this?" mandatory once per phone + "+ New person" · pill-style Refresh. */
 (function(){
-const hasAi = () => !!(SERVER && SERVER.ai);
+/* purple AI input bars (outline + focus). Beats the global green input:focus rule. */
+const aiCss = document.createElement('style');
+aiCss.textContent = '.card.ai input,.card.ai select,#aiQ,#aiPref,#fnQ,#aiWNote{border-color:var(--ai-line)}'
+  + '.card.ai input:focus,.card.ai select:focus,#aiQ:focus,#aiPref:focus,#fnQ:focus,#aiWNote:focus{border-color:var(--ai);box-shadow:0 0 0 2px var(--ai-soft)}';
+document.head.appendChild(aiCss);
+
+/* the routine writes times as sheet numbers (days since 1899-12-30, e.g. 46347.79861 = 2026-11-21 19:10). Convert them back to text. */
+const sn = v => {
+  if (!/^\d{5}(\.\d+)?$/.test(String(v == null ? '' : v))) return v;
+  const d = new Date(Math.round((Number(v) - 25569) * 1440) * 60000).toISOString();   // wall-clock serial: read the UTC fields
+  return d.slice(0, 10) + ' ' + d.slice(11, 16);
+};
+function fixAi(){
+  const A = SERVER.ai; A._f = 1;
+  (A.ins || []).forEach(x => { x[1] = sn(x[1]); });
+  (A.asks || []).forEach(x => { x[1] = sn(x[1]); x[5] = sn(x[5]); });
+  (A.sug || []).forEach(x => { x[8] = sn(x[8]); });
+  (A.plan || []).forEach(x => { x[9] = sn(x[9]); });
+  (A.ideas || []).forEach(x => { x[12] = sn(x[12]); });
+  if (A.q) A.q.last = sn(A.q.last);
+}
+const hasAi = () => { if (!(SERVER && SERVER.ai)) return false; if (!SERVER.ai._f) fixAi(); return true; };
 const aiOn = () => hasAi() && SERVER.ai.enabled;
 const hm = s => s && s.slice(0, 10) === today() ? s.slice(11, 16) : '';          // HH:mm only if it happened today
 const tm = s => { const t = hm(s); return t ? ' · ' + t : ''; };
@@ -20,13 +44,18 @@ let askDraft = '', planOpen = false, insOpen = {}, aiBusy = false, finWait = fal
 const waitBox = (t, sub) => `<div class="aiw"><div class="row" style="gap:8px"><i></i><b>${esc(t)}</b></div><div class="small">${esc(sub || "Might take a while… You can leave your question here. It's still in process and will appear when it's ready.")}</div></div>`;
 
 /* ---------- backend ---------- */
-async function coachCall(r){
+async function coachCall(r, quiet){
   try{
     const j = await call(Object.assign({action:'coach'}, r));
     if (!j.ok) throw new Error(j.error);
     if (j.ai && SERVER) { SERVER.ai = j.ai; LS.set('data', SERVER); rebuild(); }
     return j;
-  }catch(e){ toast('⚠️ ' + (e.message === 'NO_URL' ? 'No connection' : String(e.message || e)), 3200); return null; }
+  }catch(e){ if (!quiet) toast('⚠️ ' + (e.message === 'NO_URL' ? 'No connection' : String(e.message || e)), 3200); return null; }
+}
+/** fresh AI data straight from the sheet (the coach op skips the 60 s cache). No toast on failure. */
+async function freshAi(){
+  if (!hasAi() || navigator.onLine === false) return false;
+  return !!(await coachCall({op:'queue'}, true));
 }
 /** lock a button (disabled + "…") while an AI call runs */
 async function lockBtn(b, fn){
@@ -48,7 +77,12 @@ const askLocal = {};                                                            
 const localAsk = p => { const a = askLocal[p]; if (!a || Date.now() - a.at > WAIT) return null; return SERVER.ai.asks.some(x => x[2] === p && x[3] === a.q && tsOf(x[1]) >= mf(a.at)) ? null : a; };
 const askWait = p => hasAi() && (!!localAsk(p) || SERVER.ai.asks.some(x => x[2] === p && !x[4] && x[6] === 'pending' && Date.now() - tsOf(x[1]) < WAIT));
 const setIns = (p, v) => { const o = Object.assign({}, LS.get('insReq', {})); if (v) o[p] = v; else delete o[p]; LS.set('insReq', o); };
-const insWait = p => { const t = (LS.get('insReq', {}) || {})[p]; if (!t || Date.now() - t > WAIT) return false; return !SERVER.ai.ins.some(x => x[2] === p && tsOf(x[1]) >= mf(t)); };
+const insWait = p => {
+  const t = (LS.get('insReq', {}) || {})[p]; if (!t || Date.now() - t > WAIT) return false;
+  const A = SERVER.ai, q = A.q || {};
+  if (A.ins.some(x => x[2] === p && tsOf(x[1]) >= mf(t))) return false;            // the new rows are there
+  return !(Date.now() - t > 90000 && !q.pending && !q.running && q.last && tsOf(q.last) >= mf(t));   // the coach run finished after the tap: stop waiting
+};
 const planWait = d => !!(d && d.aiReq && !d.aiReq.done && Date.now() - d.aiReq.at < WAIT);
 
 /* ---------- "next" target: always from the AI (Suggestions tab); nothing in the sheet yet → "next -" ---------- */
@@ -411,7 +445,7 @@ function finder(slot, qInput){
       if (!j) { asked = keep.asked; askedAt = keep.askedAt; prevQ = keep.prevQ; hold = 0; if (keep.asked) setLastFind(p, keep.asked); draw(); }
       return;
     }
-    if (e.target.id === 'fnRef') return lockBtn(e.target, async () => { await refresh(true); draw(); });
+    if (e.target.id === 'fnRef') return lockBtn(e.target, async () => { await freshAi(); draw(); });
     if (e.target.id === 'fnAdd') return lockBtn(e.target, async () => {
       const picks = ready(asked).filter(x => sel.has(x[0]));
       const j = await coachCall({op:'ideasAdded', rows: picks.map(x => x[0]), items: picks.map(x => ({name: titleCase(x[4]), split: x[5] || 'upper', type: x[6] === 'static' ? 'static' : ''}))});
@@ -422,9 +456,9 @@ function finder(slot, qInput){
     const r = e.target.closest('[data-ir]'); if (!r) return;
     const k = Number(r.dataset.ir); if (sel.has(k)) sel.delete(k); else sel.add(k); draw();
   };
-  const tick = setInterval(async () => {                                                 // keeps refreshing while it searches (stops when the sheet closes)
+  const tick = setInterval(async () => {                                                 // keeps checking the sheet while it searches (stops when the sheet closes)
     if (!box.isConnected) { clearInterval(tick); finWait = false; return; }
-    if (waiting() && navigator.onLine !== false) { await refresh(true); draw(); }
+    if (waiting()) { await freshAi(); draw(); }
   }, 7000);
   draw();
 }
@@ -443,9 +477,17 @@ openExEdit = function(name){
   newChooser();
 };
 
-/* ---------- refresh every 30 s, only while something waits for the AI ---------- */
+/* ---------- fast read-back: every 8 s, only while something waits for the AI. Fresh sheet data (no cache); redraws only when something changed ---------- */
 const anyWait = () => aiOn() && SEL && SEL[0] && (askWait(SEL[0]) || insWait(SEL[0]) || planWait(DRAFT) || finWait);
-setInterval(() => { if (document.visibilityState === 'visible' && navigator.onLine !== false && anyWait()) refresh(false); }, 30000);
+const sig = () => { const A = SERVER.ai, q = A.q || {}, lp = A.plan[A.plan.length - 1] || [];
+  return [A.ins.length, A.asks.map(a => a[4] ? 1 : 0).join(''), A.plan.length, lp[9], A.ideas.length, A.sug.length, q.last, q.pending, q.running].join('|'); };
+let polling = false;
+setInterval(async () => {
+  if (polling || document.visibilityState !== 'visible' || !anyWait()) return;
+  polling = true;
+  try { const s = sig(); if (await freshAi() && sig() !== s) render(); }
+  finally { polling = false; }
+}, 8000);
 
 if (SERVER) render();
 })();
